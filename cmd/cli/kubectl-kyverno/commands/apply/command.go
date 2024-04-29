@@ -89,10 +89,42 @@ func Command() *cobra.Command {
 			cmd.SilenceErrors = true
 			printSkippedAndInvalidPolicies(out, skipInvalidPolicies)
 			if applyCommandConfig.PolicyReport {
-				printReport(out, responses, applyCommandConfig.AuditWarn)
+				printReports(out, responses, applyCommandConfig.AuditWarn)
 			} else if table {
 				printTable(out, detailedResults, applyCommandConfig.AuditWarn, responses...)
 			} else {
+				for _, response := range responses {
+					println("## " + response.Policy().GetName())
+					var failedRules []engineapi.RuleResponse
+					resPath := fmt.Sprintf("%s/%s/%s", response.Resource.GetNamespace(), response.Resource.GetKind(), response.Resource.GetName())
+					for _, rule := range response.PolicyResponse.Rules {
+						if rule.Status() == engineapi.RuleStatusFail {
+							failedRules = append(failedRules, rule)
+						}
+						if rule.RuleType() == engineapi.Mutation {
+							if rule.Status() == engineapi.RuleStatusSkip {
+								fmt.Fprintln(out, "\nskipped mutate policy", response.Policy().GetName(), "->", "resource", resPath)
+							} else if rule.Status() == engineapi.RuleStatusError {
+								fmt.Fprintln(out, "\nerror while applying mutate policy", response.Policy().GetName(), "->", "resource", resPath, "\nerror: ", rule.Message())
+							}
+						}
+					}
+					if len(failedRules) > 0 {
+						auditWarn := false
+						if applyCommandConfig.AuditWarn && response.GetValidationFailureAction().Audit() {
+							auditWarn = true
+						}
+						if auditWarn {
+							fmt.Fprintln(out, "policy", response.Policy().GetName(), "->", "resource", resPath, "failed as audit warning:")
+						} else {
+							fmt.Fprintln(out, "policy", response.Policy().GetName(), "->", "resource", resPath, "failed:")
+						}
+						for i, rule := range failedRules {
+							fmt.Fprintln(out, i+1, "-", rule.Name(), rule.Message())
+						}
+						fmt.Fprintln(out, "")
+					}
+				}
 				printViolations(out, rc)
 			}
 			return exit(out, rc, applyCommandConfig.warnExitCode, applyCommandConfig.warnNoPassed)
@@ -167,7 +199,7 @@ func (c *ApplyCommandConfig) applyCommandHelper(out io.Writer) (*processor.Resul
 	if err != nil {
 		return rc, resources1, skipInvalidPolicies, responses1, fmt.Errorf("Error: failed to load exceptions (%s)", err)
 	}
-	if !c.Stdin {
+	if !c.Stdin && !c.PolicyReport {
 		var policyRulesCount int
 		for _, policy := range policies {
 			policyRulesCount += len(autogen.ComputeRules(policy, ""))
@@ -446,18 +478,17 @@ func printSkippedAndInvalidPolicies(out io.Writer, skipInvalidPolicies SkippedIn
 	}
 }
 
-func printReport(out io.Writer, engineResponses []engineapi.EngineResponse, auditWarn bool) {
+func printReports(out io.Writer, engineResponses []engineapi.EngineResponse, auditWarn bool) {
 	clustered, namespaced := report.ComputePolicyReports(auditWarn, engineResponses...)
-	if len(clustered) > 0 || len(namespaced) > 0 {
-		fmt.Fprintln(out, divider)
-		fmt.Fprintln(out, "POLICY REPORT:")
-		fmt.Fprintln(out, divider)
+	if len(clustered) > 0 {
 		report := report.MergeClusterReports(clustered)
 		yamlReport, _ := yaml.Marshal(report)
 		fmt.Fprintln(out, string(yamlReport))
-	} else {
-		fmt.Fprintln(out, divider)
-		fmt.Fprintln(out, "POLICY REPORT: skip generating policy report (no validate policy found/resource skipped)")
+	}
+	for _, r := range namespaced {
+		fmt.Fprintln(out, "---")
+		yamlReport, _ := yaml.Marshal(r)
+		fmt.Fprintln(out, string(yamlReport))
 	}
 }
 
